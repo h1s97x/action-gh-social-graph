@@ -6,8 +6,7 @@ on:
   workflow_dispatch: 
 
 jobs:
-  generate-graph:
-
+  test-social-graph:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,12 +17,14 @@ jobs:
         uses: h1s97x/action-gh-social-graph@main
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          output_file: 'social-graph.png'           # 输出文件名
           
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: social-graph-results
-          path: social-graph.png
+          path: |
+            *.html
+            *.json
+            dist/
           retention-days: 30
