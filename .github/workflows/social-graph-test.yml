@@ -1,0 +1,29 @@
+name: Social Graph Test
+
+on:
+  push:
+    branches: [ test/action-graph ] 
+  workflow_dispatch: 
+
+jobs:
+  generate-graph:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Social Graph Analysis
+        uses: h1s97x/action-gh-social-graph@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          output_file: 'social-graph.png'           # 输出文件名
+          
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-graph-results
+          path: social-graph.png
+          retention-days: 30
