@@ -30373,6 +30373,10 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GitHubAPIService = exports.GitHubAPIError = void 0;
 exports.createGitHubAPI = createGitHubAPI;
 const GITHUB_API_BASE = 'https://api.github.com';
+const DEFAULT_ACCEPT = 'application/vnd.github.v3+json';
+// stargazers 接口默认只返回用户数组；要拿到 { user, starred_at } 结构
+// （含标星时间），必须使用 star 媒体类型，否则下游读 item.user 会得到 undefined
+const STAR_ACCEPT = 'application/vnd.github.v3.star+json';
 class GitHubAPIError extends Error {
     constructor(message, status, rateLimit) {
         super(message);
@@ -30457,9 +30461,9 @@ class GitHubAPIService {
             reset: new Date(parseInt(response.headers.get('X-RateLimit-Reset') || '0') * 1000),
         };
     }
-    async fetch(endpoint) {
+    async fetch(endpoint, accept = DEFAULT_ACCEPT) {
         const headers = {
-            Accept: 'application/vnd.github.v3+json',
+            Accept: accept,
             'User-Agent': 'GitHub-Social-Graph-Action',
         };
         if (this.token) {
@@ -30483,7 +30487,7 @@ class GitHubAPIService {
         return this.fetch(`/repos/${owner}/${repo}/contributors?page=${page}&per_page=${perPage}`);
     }
     async getStargazers(owner, repo, page = 1, perPage = 100) {
-        return this.fetch(`/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`);
+        return this.fetch(`/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`, STAR_ACCEPT);
     }
     async getAllFollowers(username, maxPages = 5) {
         const all = [];

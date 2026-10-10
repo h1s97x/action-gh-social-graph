@@ -2,6 +2,11 @@ import { GitHubUser, GitHubRepository, GitHubContributor, GitHubFollower } from 
 
 const GITHUB_API_BASE = 'https://api.github.com';
 
+const DEFAULT_ACCEPT = 'application/vnd.github.v3+json';
+// stargazers 接口默认只返回用户数组；要拿到 { user, starred_at } 结构
+// （含标星时间），必须使用 star 媒体类型，否则下游读 item.user 会得到 undefined
+const STAR_ACCEPT = 'application/vnd.github.v3.star+json';
+
 export class GitHubAPIError extends Error {
   constructor(
     message: string,
@@ -77,7 +82,7 @@ export class GitHubAPIService {
         // 等待时输出日志
         console.warn(
           `[GitHub API] Rate limit / error ${response.status} on ${endpoint}, ` +
-            `retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`
+          `retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`
         );
 
         await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -128,9 +133,9 @@ export class GitHubAPIService {
     };
   }
 
-  private async fetch<T>(endpoint: string): Promise<T> {
+  private async fetch<T>(endpoint: string, accept = DEFAULT_ACCEPT): Promise<T> {
     const headers: Record<string, string> = {
-      Accept: 'application/vnd.github.v3+json',
+      Accept: accept,
       'User-Agent': 'GitHub-Social-Graph-Action',
     };
 
@@ -185,7 +190,10 @@ export class GitHubAPIService {
     page = 1,
     perPage = 100
   ): Promise<Array<{ user: GitHubUser; starred_at: string }>> {
-    return this.fetch(`/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`);
+    return this.fetch(
+      `/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`,
+      STAR_ACCEPT
+    );
   }
 
   async getAllFollowers(username: string, maxPages = 5): Promise<GitHubFollower[]> {
