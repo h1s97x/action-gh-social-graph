@@ -1,0 +1,33 @@
+name: Social Graph Demo
+
+# 演示用工作流：PR 打开时分析 PR 作者的社交图谱并发帖到本 PR；
+# 也支持手动触发指定任意用户名。
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      username:
+        description: '要分析的 GitHub 用户名（留空则用仓库所有者）'
+        required: false
+        default: ''
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  graph:
+    name: Analyze social graph
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run social graph action
+        uses: ./
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ github.event.inputs.username || github.event.pull_request.user.login || github.repository_owner }}
+          max-followers: '50'
+          max-repos: '15'
+          comment-on-pr: 'true'

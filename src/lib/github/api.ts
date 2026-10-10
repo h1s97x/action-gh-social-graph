@@ -2,6 +2,11 @@ import { GitHubUser, GitHubRepository, GitHubContributor, GitHubFollower } from 
 
 const GITHUB_API_BASE = 'https://api.github.com';
 
+const DEFAULT_ACCEPT = 'application/vnd.github.v3+json';
+// stargazers 接口默认只返回用户数组；要拿到 { user, starred_at } 结构
+// （含标星时间），必须使用 star 媒体类型，否则下游读 item.user 会得到 undefined
+const STAR_ACCEPT = 'application/vnd.github.v3.star+json';
+
 export class GitHubAPIError extends Error {
   constructor(
     message: string,
@@ -77,7 +82,7 @@ export class GitHubAPIService {
         // 等待时输出日志
         console.warn(
           `[GitHub API] Rate limit / error ${response.status} on ${endpoint}, ` +
-            `retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`
+          `retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`
         );
 
         await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -128,13 +133,20 @@ export class GitHubAPIService {
     };
   }
 
-  private async fetch<T>(endpoint: string): Promise<T> {
+  private async fetch<T>(
+    endpoint: string,
+    accept = DEFAULT_ACCEPT,
+    opts: { withAuth?: boolean } = {}
+  ): Promise<T> {
+    const { withAuth = true } = opts;
     const headers: Record<string, string> = {
-      Accept: 'application/vnd.github.v3+json',
+      Accept: accept,
       'User-Agent': 'GitHub-Social-Graph-Action',
     };
 
-    if (this.token) {
+    // stargazers 等社交类接口不接受 Actions 的集成 GITHUB_TOKEN（403），
+    // 需要时以匿名身份请求公开仓库，因此允许调用方显式去掉认证头
+    if (this.token && withAuth) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
@@ -185,7 +197,36 @@ export class GitHubAPIService {
     page = 1,
     perPage = 100
   ): Promise<Array<{ user: GitHubUser; starred_at: string }>> {
-    return this.fetch(`/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`);
+    const endpoint = `/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`;
+    const isAuthErr = (err: unknown): boolean =>
+      err instanceof GitHubAPIError && (err.status === 401 || err.status === 403);
+    const normalize = (data: unknown, starred: boolean) => {
+      if (!Array.isArray(data)) return [];
+      if (starred) {
+        return data as Array<{ user: GitHubUser; starred_at: string }>;
+      }
+      // 默认媒体类型返回纯用户数组
+      return (data as GitHubUser[]).map((user) => ({ user, starred_at: '' }));
+    };
+
+    // 第一选择：star 媒体类型（带 starred_at），PAT 可用
+    try {
+      return normalize(await this.fetch<unknown>(endpoint, STAR_ACCEPT), true);
+    } catch (err) {
+      if (!isAuthErr(err)) throw err;
+    }
+    // 回退 1：Actions 集成令牌对 star 媒体类型 403，试默认媒体类型（仍带令牌）
+    try {
+      return normalize(await this.fetch<unknown>(endpoint, DEFAULT_ACCEPT), false);
+    } catch (err) {
+      if (!isAuthErr(err)) throw err;
+    }
+    // 回退 2：集成令牌对整个 stargazers 接口均 403；匿名访问公开仓库可用
+    // （私有仓库此时 404，star 信号自然为空，不影响其余分析）
+    return normalize(
+      await this.fetch<unknown>(endpoint, DEFAULT_ACCEPT, { withAuth: false }),
+      false
+    );
   }
 
   async getAllFollowers(username: string, maxPages = 5): Promise<GitHubFollower[]> {

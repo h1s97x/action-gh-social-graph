@@ -30092,6 +30092,24 @@ const NODE_COLORS = {
 };
 /** 并发池大小限制 */
 const CONCURRENCY_LIMIT = 5;
+/**
+ * 推荐打分中"为仓库点 star"信号的单仓库权重。
+ *
+ * 贡献信号直接使用贡献次数（通常 2~20），star 是弱得多的单向信号，
+ * 因此每个被 star 仓库只计 2 分：点一个仓库（2 分）不会盖过真正的协作者，
+ * 连续为多个仓库点 star（兴趣重合强）才会显著上浮。
+ */
+const STAR_SIGNAL_WEIGHT = 2;
+/**
+ * 判断是否为机器人账号（github-actions[bot]、dependabot[bot]、renovate[bot] 等）。
+ *
+ * GitHub contributors 接口会返回 ``type: 'Bot'``；部分历史/边缘响应缺该字段，
+ * 但机器人 login 一律以 ``[bot]`` 结尾，作为兜底判断。
+ * 机器人不是"社交网络"的一部分：不应进入协作者榜单或推荐关注。
+ */
+function isBotAccount(account) {
+    return account.type === 'Bot' || account.login.endsWith('[bot]');
+}
 class SocialGraphAnalyzer {
     constructor(api) {
         this.api = api ?? (0, api_1.createGitHubAPI)();
@@ -30108,7 +30126,7 @@ class SocialGraphAnalyzer {
         const repoData = await this.analyzeRepositories(repos, maxRepos);
         const graph = this.buildGraph(mainUser, followers, following, mutualFollowers, repos, repoData);
         const recommendations = this.generateRecommendations(mainUser, following, repoData);
-        const insights = this.generateInsights(repos, repoData);
+        const insights = this.generateInsights(mainUser, repos, repoData);
         // 收集限流信息用于日志/报告输出
         const rateLimit = this.api.getRateLimit();
         if (rateLimit && rateLimit.remaining !== undefined && rateLimit.limit > 0) {
@@ -30139,14 +30157,25 @@ class SocialGraphAnalyzer {
             while (index < sorted.length) {
                 const repo = sorted[index++];
                 try {
-                    const repoContributors = await this.api.getContributors(repo.owner.login, repo.name);
-                    contributors.set(repo.full_name, repoContributors.slice(0, 20).map((c) => ({
+                    const repoContributorsRaw = await this.api.getContributors(repo.owner.login, repo.name);
+                    // 空贡献列表 GitHub 返回 204 No Content，经 JSON 解析后为 null/{}，
+                    // 这里统一归一化为数组，避免 .filter 崩溃导致整个仓库分析丢失
+                    const repoContributors = Array.isArray(repoContributorsRaw)
+                        ? repoContributorsRaw
+                        : [];
+                    contributors.set(repo.full_name, 
+                    // 机器人提交（dependabot / github-actions 等）不计入社交关系，
+                    // 在聚合入口统一过滤 —— 图谱节点、推荐、洞察三处同时受益
+                    repoContributors
+                        .filter((c) => !isBotAccount(c))
+                        .slice(0, 20)
+                        .map((c) => ({
                         login: c.login,
                         contributions: c.contributions,
                     })));
                     try {
                         const stargazerList = await this.api.getStargazers(repo.owner.login, repo.name, 1, 50);
-                        stargazers.set(repo.full_name, stargazerList.map((s) => s.user.login));
+                        stargazers.set(repo.full_name, stargazerList.map((s) => ({ login: s.user.login, type: s.user.type })));
                     }
                     catch (stargazerErr) {
                         // stargazers 需要认证，若失败输出告警而非静默忽略
@@ -30283,6 +30312,7 @@ class SocialGraphAnalyzer {
     generateRecommendations(mainUser, following, repoData) {
         const followingSet = new Set(following.map((f) => f.login));
         const scoreMap = new Map();
+        // 信号 1：跨仓库协作者（强信号，按贡献次数计分）
         for (const [repo, contributors] of repoData.contributors) {
             for (const contributor of contributors) {
                 if (contributor.login === mainUser.login || followingSet.has(contributor.login))
@@ -30292,6 +30322,29 @@ class SocialGraphAnalyzer {
                 entry.reasons.push(`在 ${repo} 中有 ${contributor.contributions} 次贡献`);
                 scoreMap.set(contributor.login, entry);
             }
+        }
+        // 信号 2：为多个仓库点 star 的用户（弱信号，跨仓库兴趣重合才显著）。
+        // 先聚合每个人点过哪些仓库，再一次性计分，避免 reason 被单仓库刷屏。
+        const starredRepoMap = new Map();
+        for (const [repo, stars] of repoData.stargazers) {
+            for (const star of stars) {
+                if (isBotAccount(star) || star.login === mainUser.login || followingSet.has(star.login)) {
+                    continue;
+                }
+                const list = starredRepoMap.get(star.login) ?? [];
+                list.push(repo);
+                starredRepoMap.set(star.login, list);
+            }
+        }
+        for (const [login, starredRepos] of starredRepoMap) {
+            const entry = scoreMap.get(login) ?? { score: 0, reasons: [] };
+            entry.score += starredRepos.length * STAR_SIGNAL_WEIGHT;
+            const names = starredRepos
+                .slice(0, 3)
+                .map((r) => r.split('/')[1])
+                .join('、');
+            entry.reasons.push(`为你的 ${starredRepos.length} 个仓库点过 star（${names}）`);
+            scoreMap.set(login, entry);
         }
         return Array.from(scoreMap.entries())
             .sort((a, b) => b[1].score - a[1].score)
@@ -30306,10 +30359,13 @@ class SocialGraphAnalyzer {
             reasons: data.reasons.slice(0, 3),
         }));
     }
-    generateInsights(repos, repoData) {
+    generateInsights(mainUser, repos, repoData) {
         const collaboratorMap = new Map();
         for (const contributors of repoData.contributors.values()) {
             for (const c of contributors) {
+                // 自己永远是自己仓库的第一贡献者，榜单展示"他人"才有意义
+                if (c.login === mainUser.login)
+                    continue;
                 collaboratorMap.set(c.login, (collaboratorMap.get(c.login) ?? 0) + c.contributions);
             }
         }
@@ -30354,6 +30410,10 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GitHubAPIService = exports.GitHubAPIError = void 0;
 exports.createGitHubAPI = createGitHubAPI;
 const GITHUB_API_BASE = 'https://api.github.com';
+const DEFAULT_ACCEPT = 'application/vnd.github.v3+json';
+// stargazers 接口默认只返回用户数组；要拿到 { user, starred_at } 结构
+// （含标星时间），必须使用 star 媒体类型，否则下游读 item.user 会得到 undefined
+const STAR_ACCEPT = 'application/vnd.github.v3.star+json';
 class GitHubAPIError extends Error {
     constructor(message, status, rateLimit) {
         super(message);
@@ -30438,12 +30498,15 @@ class GitHubAPIService {
             reset: new Date(parseInt(response.headers.get('X-RateLimit-Reset') || '0') * 1000),
         };
     }
-    async fetch(endpoint) {
+    async fetch(endpoint, accept = DEFAULT_ACCEPT, opts = {}) {
+        const { withAuth = true } = opts;
         const headers = {
-            Accept: 'application/vnd.github.v3+json',
+            Accept: accept,
             'User-Agent': 'GitHub-Social-Graph-Action',
         };
-        if (this.token) {
+        // stargazers 等社交类接口不接受 Actions 的集成 GITHUB_TOKEN（403），
+        // 需要时以匿名身份请求公开仓库，因此允许调用方显式去掉认证头
+        if (this.token && withAuth) {
             headers['Authorization'] = `Bearer ${this.token}`;
         }
         return this.fetchWithRetry(endpoint, headers);
@@ -30464,7 +30527,36 @@ class GitHubAPIService {
         return this.fetch(`/repos/${owner}/${repo}/contributors?page=${page}&per_page=${perPage}`);
     }
     async getStargazers(owner, repo, page = 1, perPage = 100) {
-        return this.fetch(`/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`);
+        const endpoint = `/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`;
+        const isAuthErr = (err) => err instanceof GitHubAPIError && (err.status === 401 || err.status === 403);
+        const normalize = (data, starred) => {
+            if (!Array.isArray(data))
+                return [];
+            if (starred) {
+                return data;
+            }
+            // 默认媒体类型返回纯用户数组
+            return data.map((user) => ({ user, starred_at: '' }));
+        };
+        // 第一选择：star 媒体类型（带 starred_at），PAT 可用
+        try {
+            return normalize(await this.fetch(endpoint, STAR_ACCEPT), true);
+        }
+        catch (err) {
+            if (!isAuthErr(err))
+                throw err;
+        }
+        // 回退 1：Actions 集成令牌对 star 媒体类型 403，试默认媒体类型（仍带令牌）
+        try {
+            return normalize(await this.fetch(endpoint, DEFAULT_ACCEPT), false);
+        }
+        catch (err) {
+            if (!isAuthErr(err))
+                throw err;
+        }
+        // 回退 2：集成令牌对整个 stargazers 接口均 403；匿名访问公开仓库可用
+        // （私有仓库此时 404，star 信号自然为空，不影响其余分析）
+        return normalize(await this.fetch(endpoint, DEFAULT_ACCEPT, { withAuth: false }), false);
     }
     async getAllFollowers(username, maxPages = 5) {
         const all = [];

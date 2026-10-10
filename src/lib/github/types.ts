@@ -17,6 +17,8 @@ export interface GitHubUser {
   following: number;
   created_at: string;
   updated_at: string;
+  // GitHub API 在用户对象上返回账号类型：User | Bot | Organization 等（可选字段）
+  type?: string;
 }
 
 export interface GitHubRepository {
@@ -51,6 +53,9 @@ export interface GitHubContributor {
   avatar_url: string;
   html_url: string;
   contributions: number;
+  // GitHub API 返回账号类型：User | Bot | Mannequin | Organization 等
+  // （contributors 接口实测会带该字段；缺省视为普通用户）
+  type?: string;
 }
 
 export interface GitHubFollower {
