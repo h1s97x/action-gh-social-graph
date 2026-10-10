@@ -30498,12 +30498,15 @@ class GitHubAPIService {
             reset: new Date(parseInt(response.headers.get('X-RateLimit-Reset') || '0') * 1000),
         };
     }
-    async fetch(endpoint, accept = DEFAULT_ACCEPT) {
+    async fetch(endpoint, accept = DEFAULT_ACCEPT, opts = {}) {
+        const { withAuth = true } = opts;
         const headers = {
             Accept: accept,
             'User-Agent': 'GitHub-Social-Graph-Action',
         };
-        if (this.token) {
+        // stargazers 等社交类接口不接受 Actions 的集成 GITHUB_TOKEN（403），
+        // 需要时以匿名身份请求公开仓库，因此允许调用方显式去掉认证头
+        if (this.token && withAuth) {
             headers['Authorization'] = `Bearer ${this.token}`;
         }
         return this.fetchWithRetry(endpoint, headers);
@@ -30525,26 +30528,35 @@ class GitHubAPIService {
     }
     async getStargazers(owner, repo, page = 1, perPage = 100) {
         const endpoint = `/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`;
-        try {
-            const data = await this.fetch(endpoint, STAR_ACCEPT);
-            // star 媒体类型返回 [{ user, starred_at }]
-            if (Array.isArray(data)) {
-                return data;
-            }
-            throw new GitHubAPIError('stargazers response is not an array', 502);
-        }
-        catch (err) {
-            // Actions 默认 GITHUB_TOKEN 对 star 媒体类型返回 403/401（"Resource not
-            // accessible by integration"）。本工具只需要 stargazer 的 login，
-            // 回退默认媒体类型：返回纯用户数组，拿不到 starred_at 但不影响推荐信号。
-            const status = err instanceof GitHubAPIError ? err.status : 0;
-            if (status !== 401 && status !== 403)
-                throw err;
-            const data = await this.fetch(endpoint, DEFAULT_ACCEPT);
+        const isAuthErr = (err) => err instanceof GitHubAPIError && (err.status === 401 || err.status === 403);
+        const normalize = (data, starred) => {
             if (!Array.isArray(data))
                 return [];
+            if (starred) {
+                return data;
+            }
+            // 默认媒体类型返回纯用户数组
             return data.map((user) => ({ user, starred_at: '' }));
+        };
+        // 第一选择：star 媒体类型（带 starred_at），PAT 可用
+        try {
+            return normalize(await this.fetch(endpoint, STAR_ACCEPT), true);
         }
+        catch (err) {
+            if (!isAuthErr(err))
+                throw err;
+        }
+        // 回退 1：Actions 集成令牌对 star 媒体类型 403，试默认媒体类型（仍带令牌）
+        try {
+            return normalize(await this.fetch(endpoint, DEFAULT_ACCEPT), false);
+        }
+        catch (err) {
+            if (!isAuthErr(err))
+                throw err;
+        }
+        // 回退 2：集成令牌对整个 stargazers 接口均 403；匿名访问公开仓库可用
+        // （私有仓库此时 404，star 信号自然为空，不影响其余分析）
+        return normalize(await this.fetch(endpoint, DEFAULT_ACCEPT, { withAuth: false }), false);
     }
     async getAllFollowers(username, maxPages = 5) {
         const all = [];

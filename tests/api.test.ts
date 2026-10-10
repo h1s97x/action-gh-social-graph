@@ -96,6 +96,33 @@ describe('GitHubAPIService', () => {
     expect(stars[0].starred_at).toBe(''); // 回退路径无标星时间
   });
 
+  it('带令牌两次均 403 时匿名重试（Actions 集成令牌的真实行为）', async () => {
+    const forbidden = () =>
+      new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), {
+        status: 403,
+        headers: RATE_LIMIT_HEADERS,
+      });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(forbidden()) // star + token
+      .mockResolvedValueOnce(forbidden()) // 默认 accept + token
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ login: 'bob' }]), {
+          status: 200,
+          headers: RATE_LIMIT_HEADERS,
+        })
+      ); // 默认 accept + 匿名
+    vi.stubGlobal('fetch', fetchMock);
+    const api = new GitHubAPIService('test-token');
+
+    const stars = await api.getStargazers('alice', 'repo-a');
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [, init3] = fetchMock.mock.calls[2];
+    expect(init3.headers as Record<string, string>).not.toHaveProperty('Authorization');
+    expect(stars.map((s) => s.user.login)).toEqual(['bob']);
+  });
+
   it('无 token 时不发送 Authorization 头', async () => {
     const fetchMock = stubFetchJson([]);
     const api = new GitHubAPIService();
