@@ -64,13 +64,18 @@ function makeRepo(fullName: string, stargazers = 10, fork = false): GitHubReposi
   };
 }
 
-function makeContributor(login: string, contributions: number): GitHubContributor {
+function makeContributor(
+  login: string,
+  contributions: number,
+  type?: string
+): GitHubContributor {
   return {
     login,
     id: 1,
     avatar_url: `https://avatars.githubusercontent.com/${login}`,
     html_url: `https://github.com/${login}`,
     contributions,
+    ...(type ? { type } : {}),
   };
 }
 
@@ -224,6 +229,61 @@ describe('SocialGraphAnalyzer', () => {
       const carol = result.recommendations.find((r) => r.user.login === 'carol');
       expect(carol?.score).toBe(17);
       expect(carol?.reasons.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('机器人账号过滤 (isBotAccount)', () => {
+    it('机器人不进入图谱节点、推荐与顶级协作者榜单', async () => {
+      const mock = new MockGitHubAPI({
+        user: mainUser,
+        repos: [makeRepo('alice/repo-a', 10)],
+        contributorsByRepo: {
+          'alice/repo-a': [
+            makeContributor('alice', 99), // 主用户
+            makeContributor('github-actions[bot]', 12, 'Bot'), // type 标识
+            makeContributor('dependabot[bot]', 5), // 缺 type，靠 [bot] 后缀兜底
+            makeContributor('carol', 7), // 唯一真人
+          ],
+        },
+      });
+
+      const analyzer = createAnalyzer(mock);
+      const result = await analyzer.analyzeUser('alice', { maxFollowers: 50, maxRepos: 15 });
+
+      const userNodes = result.graph.nodes
+        .filter((n) => n.type === 'user')
+        .map((n) => n.id);
+      expect(userNodes).not.toContain('github-actions[bot]');
+      expect(userNodes).not.toContain('dependabot[bot]');
+      expect(userNodes).toContain('carol');
+
+      const recLogins = result.recommendations.map((r) => r.user.login);
+      expect(recLogins).toEqual(['carol']); // 两个 bot 全被剔除，不是占据榜首
+
+      const topLogins = result.insights.topCollaborators.map((c) => c.user.login);
+      expect(topLogins).not.toContain('github-actions[bot]');
+      expect(topLogins).not.toContain('dependabot[bot]');
+    });
+
+    it('顶级协作者榜单排除主用户自己', async () => {
+      const mock = new MockGitHubAPI({
+        user: mainUser,
+        repos: [makeRepo('alice/repo-a', 10), makeRepo('alice/repo-b', 10)],
+        contributorsByRepo: {
+          'alice/repo-a': [
+            makeContributor('alice', 400), // 自己，提交最多但不应上榜
+            makeContributor('carol', 6),
+          ],
+          'alice/repo-b': [makeContributor('alice', 57), makeContributor('dave', 3)],
+        },
+      });
+
+      const analyzer = createAnalyzer(mock);
+      const result = await analyzer.analyzeUser('alice', { maxFollowers: 50, maxRepos: 15 });
+
+      const topLogins = result.insights.topCollaborators.map((c) => c.user.login);
+      expect(topLogins).not.toContain('alice');
+      expect(topLogins).toEqual(['carol', 'dave']);
     });
   });
 });

@@ -51,6 +51,9 @@ export interface GitHubContributor {
   avatar_url: string;
   html_url: string;
   contributions: number;
+  // GitHub API 返回账号类型：User | Bot | Mannequin | Organization 等
+  // （contributors 接口实测会带该字段；缺省视为普通用户）
+  type?: string;
 }
 
 export interface GitHubFollower {

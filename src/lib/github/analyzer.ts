@@ -20,6 +20,17 @@ const NODE_COLORS = {
 /** 并发池大小限制 */
 const CONCURRENCY_LIMIT = 5;
 
+/**
+ * 判断是否为机器人账号（github-actions[bot]、dependabot[bot]、renovate[bot] 等）。
+ *
+ * GitHub contributors 接口会返回 ``type: 'Bot'``；部分历史/边缘响应缺该字段，
+ * 但机器人 login 一律以 ``[bot]`` 结尾，作为兜底判断。
+ * 机器人不是"社交网络"的一部分：不应进入协作者榜单或推荐关注。
+ */
+function isBotAccount(account: { type?: string; login: string }): boolean {
+  return account.type === 'Bot' || account.login.endsWith('[bot]');
+}
+
 export class SocialGraphAnalyzer {
   private api: GitHubAPIService;
 
@@ -45,7 +56,7 @@ export class SocialGraphAnalyzer {
     const repoData = await this.analyzeRepositories(repos, maxRepos);
     const graph = this.buildGraph(mainUser, followers, following, mutualFollowers, repos, repoData);
     const recommendations = this.generateRecommendations(mainUser, following, repoData);
-    const insights = this.generateInsights(repos, repoData);
+    const insights = this.generateInsights(mainUser, repos, repoData);
 
     // 收集限流信息用于日志/报告输出
     const rateLimit = this.api.getRateLimit();
@@ -54,12 +65,12 @@ export class SocialGraphAnalyzer {
       const pct = Math.round((rateLimit.remaining / rateLimit.limit) * 100);
       core.info(
         `⏳ GitHub API rate limit: ${rateLimit.remaining}/${rateLimit.limit} remaining (${pct}%), ` +
-          `resets at ${rateLimit.reset.toISOString()}`
+        `resets at ${rateLimit.reset.toISOString()}`
       );
       if (pct < 20) {
         core.warning(
           `⚠️ Low GitHub API rate limit remaining: ${rateLimit.remaining}/${rateLimit.limit} (${pct}%). ` +
-            `Consider using a Personal Access Token with higher quota.`
+          `Consider using a Personal Access Token with higher quota.`
         );
       }
     }
@@ -93,10 +104,15 @@ export class SocialGraphAnalyzer {
           const repoContributors = await this.api.getContributors(repo.owner.login, repo.name);
           contributors.set(
             repo.full_name,
-            repoContributors.slice(0, 20).map((c) => ({
-              login: c.login,
-              contributions: c.contributions,
-            }))
+            // 机器人提交（dependabot / github-actions 等）不计入社交关系，
+            // 在聚合入口统一过滤 —— 图谱节点、推荐、洞察三处同时受益
+            repoContributors
+              .filter((c) => !isBotAccount(c))
+              .slice(0, 20)
+              .map((c) => ({
+                login: c.login,
+                contributions: c.contributions,
+              }))
           );
 
           try {
@@ -110,7 +126,7 @@ export class SocialGraphAnalyzer {
             if (stargazerErr instanceof Error) {
               core.warning(
                 `⚠️ Failed to fetch stargazers for ${repo.full_name}: ${stargazerErr.message}. ` +
-                  `Stargazers require authentication. Verify the github-token is valid and has sufficient scope.`
+                `Stargazers require authentication. Verify the github-token is valid and has sufficient scope.`
               );
             } else {
               core.warning(
@@ -295,6 +311,7 @@ export class SocialGraphAnalyzer {
   }
 
   private generateInsights(
+    mainUser: GitHubUser,
     repos: GitHubRepository[],
     repoData: {
       contributors: Map<string, Array<{ login: string; contributions: number }>>;
@@ -304,6 +321,8 @@ export class SocialGraphAnalyzer {
     const collaboratorMap = new Map<string, number>();
     for (const contributors of repoData.contributors.values()) {
       for (const c of contributors) {
+        // 自己永远是自己仓库的第一贡献者，榜单展示"他人"才有意义
+        if (c.login === mainUser.login) continue;
         collaboratorMap.set(c.login, (collaboratorMap.get(c.login) ?? 0) + c.contributions);
       }
     }

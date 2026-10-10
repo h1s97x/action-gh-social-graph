@@ -30092,6 +30092,16 @@ const NODE_COLORS = {
 };
 /** 并发池大小限制 */
 const CONCURRENCY_LIMIT = 5;
+/**
+ * 判断是否为机器人账号（github-actions[bot]、dependabot[bot]、renovate[bot] 等）。
+ *
+ * GitHub contributors 接口会返回 ``type: 'Bot'``；部分历史/边缘响应缺该字段，
+ * 但机器人 login 一律以 ``[bot]`` 结尾，作为兜底判断。
+ * 机器人不是"社交网络"的一部分：不应进入协作者榜单或推荐关注。
+ */
+function isBotAccount(account) {
+    return account.type === 'Bot' || account.login.endsWith('[bot]');
+}
 class SocialGraphAnalyzer {
     constructor(api) {
         this.api = api ?? (0, api_1.createGitHubAPI)();
@@ -30108,7 +30118,7 @@ class SocialGraphAnalyzer {
         const repoData = await this.analyzeRepositories(repos, maxRepos);
         const graph = this.buildGraph(mainUser, followers, following, mutualFollowers, repos, repoData);
         const recommendations = this.generateRecommendations(mainUser, following, repoData);
-        const insights = this.generateInsights(repos, repoData);
+        const insights = this.generateInsights(mainUser, repos, repoData);
         // 收集限流信息用于日志/报告输出
         const rateLimit = this.api.getRateLimit();
         if (rateLimit && rateLimit.remaining !== undefined && rateLimit.limit > 0) {
@@ -30140,7 +30150,13 @@ class SocialGraphAnalyzer {
                 const repo = sorted[index++];
                 try {
                     const repoContributors = await this.api.getContributors(repo.owner.login, repo.name);
-                    contributors.set(repo.full_name, repoContributors.slice(0, 20).map((c) => ({
+                    contributors.set(repo.full_name, 
+                    // 机器人提交（dependabot / github-actions 等）不计入社交关系，
+                    // 在聚合入口统一过滤 —— 图谱节点、推荐、洞察三处同时受益
+                    repoContributors
+                        .filter((c) => !isBotAccount(c))
+                        .slice(0, 20)
+                        .map((c) => ({
                         login: c.login,
                         contributions: c.contributions,
                     })));
@@ -30306,10 +30322,13 @@ class SocialGraphAnalyzer {
             reasons: data.reasons.slice(0, 3),
         }));
     }
-    generateInsights(repos, repoData) {
+    generateInsights(mainUser, repos, repoData) {
         const collaboratorMap = new Map();
         for (const contributors of repoData.contributors.values()) {
             for (const c of contributors) {
+                // 自己永远是自己仓库的第一贡献者，榜单展示"他人"才有意义
+                if (c.login === mainUser.login)
+                    continue;
                 collaboratorMap.set(c.login, (collaboratorMap.get(c.login) ?? 0) + c.contributions);
             }
         }
