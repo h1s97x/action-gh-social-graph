@@ -351,5 +351,27 @@ describe('SocialGraphAnalyzer', () => {
       expect(frank?.reasons.some((r) => r.includes('贡献'))).toBe(true);
       expect(frank?.reasons.some((r) => r.includes('star'))).toBe(true);
     });
+
+    it('contributors 返回 204 空响应（null）时不崩溃，仓库仍进入分析', async () => {
+      // 真实事故：GitHub 对空贡献列表返回 204，解析为非数组，旧代码 .filter 崩溃
+      class NullContributorsMock extends MockGitHubAPI {
+        async getContributors(): Promise<GitHubContributor[] | null> {
+          return null;
+        }
+      }
+      const mock = new NullContributorsMock({
+        user: mainUser,
+        repos: [makeRepo('alice/empty-contribs', 3)],
+        stargazersByRepo: {
+          'alice/empty-contribs': [{ login: 'grace' }],
+        },
+      });
+
+      const analyzer = createAnalyzer(mock);
+      const result = await analyzer.analyzeUser('alice', { maxFollowers: 50, maxRepos: 15 });
+
+      expect(result.graph.stats.repoNodes).toBe(1); // 仓库没因报错丢失
+      expect(result.recommendations.map((r) => r.user.login)).toEqual(['grace']); // star 信号不受影响
+    });
   });
 });

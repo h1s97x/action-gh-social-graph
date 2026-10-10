@@ -190,10 +190,25 @@ export class GitHubAPIService {
     page = 1,
     perPage = 100
   ): Promise<Array<{ user: GitHubUser; starred_at: string }>> {
-    return this.fetch(
-      `/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`,
-      STAR_ACCEPT
-    );
+    const endpoint = `/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`;
+    try {
+      const data = await this.fetch<unknown>(endpoint, STAR_ACCEPT);
+      // star 媒体类型返回 [{ user, starred_at }]
+      if (Array.isArray(data)) {
+        return data as Array<{ user: GitHubUser; starred_at: string }>;
+      }
+      throw new GitHubAPIError('stargazers response is not an array', 502);
+    } catch (err) {
+      // Actions 默认 GITHUB_TOKEN 对 star 媒体类型返回 403/401（"Resource not
+      // accessible by integration"）。本工具只需要 stargazer 的 login，
+      // 回退默认媒体类型：返回纯用户数组，拿不到 starred_at 但不影响推荐信号。
+      const status = err instanceof GitHubAPIError ? err.status : 0;
+      if (status !== 401 && status !== 403) throw err;
+
+      const data = await this.fetch<unknown>(endpoint, DEFAULT_ACCEPT);
+      if (!Array.isArray(data)) return [];
+      return (data as GitHubUser[]).map((user) => ({ user, starred_at: '' }));
+    }
   }
 
   async getAllFollowers(username: string, maxPages = 5): Promise<GitHubFollower[]> {

@@ -30157,7 +30157,12 @@ class SocialGraphAnalyzer {
             while (index < sorted.length) {
                 const repo = sorted[index++];
                 try {
-                    const repoContributors = await this.api.getContributors(repo.owner.login, repo.name);
+                    const repoContributorsRaw = await this.api.getContributors(repo.owner.login, repo.name);
+                    // 空贡献列表 GitHub 返回 204 No Content，经 JSON 解析后为 null/{}，
+                    // 这里统一归一化为数组，避免 .filter 崩溃导致整个仓库分析丢失
+                    const repoContributors = Array.isArray(repoContributorsRaw)
+                        ? repoContributorsRaw
+                        : [];
                     contributors.set(repo.full_name, 
                     // 机器人提交（dependabot / github-actions 等）不计入社交关系，
                     // 在聚合入口统一过滤 —— 图谱节点、推荐、洞察三处同时受益
@@ -30519,7 +30524,27 @@ class GitHubAPIService {
         return this.fetch(`/repos/${owner}/${repo}/contributors?page=${page}&per_page=${perPage}`);
     }
     async getStargazers(owner, repo, page = 1, perPage = 100) {
-        return this.fetch(`/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`, STAR_ACCEPT);
+        const endpoint = `/repos/${owner}/${repo}/stargazers?page=${page}&per_page=${perPage}`;
+        try {
+            const data = await this.fetch(endpoint, STAR_ACCEPT);
+            // star 媒体类型返回 [{ user, starred_at }]
+            if (Array.isArray(data)) {
+                return data;
+            }
+            throw new GitHubAPIError('stargazers response is not an array', 502);
+        }
+        catch (err) {
+            // Actions 默认 GITHUB_TOKEN 对 star 媒体类型返回 403/401（"Resource not
+            // accessible by integration"）。本工具只需要 stargazer 的 login，
+            // 回退默认媒体类型：返回纯用户数组，拿不到 starred_at 但不影响推荐信号。
+            const status = err instanceof GitHubAPIError ? err.status : 0;
+            if (status !== 401 && status !== 403)
+                throw err;
+            const data = await this.fetch(endpoint, DEFAULT_ACCEPT);
+            if (!Array.isArray(data))
+                return [];
+            return data.map((user) => ({ user, starred_at: '' }));
+        }
     }
     async getAllFollowers(username, maxPages = 5) {
         const all = [];

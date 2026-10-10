@@ -74,12 +74,12 @@ export class SocialGraphAnalyzer {
       const pct = Math.round((rateLimit.remaining / rateLimit.limit) * 100);
       core.info(
         `⏳ GitHub API rate limit: ${rateLimit.remaining}/${rateLimit.limit} remaining (${pct}%), ` +
-          `resets at ${rateLimit.reset.toISOString()}`
+        `resets at ${rateLimit.reset.toISOString()}`
       );
       if (pct < 20) {
         core.warning(
           `⚠️ Low GitHub API rate limit remaining: ${rateLimit.remaining}/${rateLimit.limit} (${pct}%). ` +
-            `Consider using a Personal Access Token with higher quota.`
+          `Consider using a Personal Access Token with higher quota.`
         );
       }
     }
@@ -110,7 +110,12 @@ export class SocialGraphAnalyzer {
       while (index < sorted.length) {
         const repo = sorted[index++];
         try {
-          const repoContributors = await this.api.getContributors(repo.owner.login, repo.name);
+          const repoContributorsRaw = await this.api.getContributors(repo.owner.login, repo.name);
+          // 空贡献列表 GitHub 返回 204 No Content，经 JSON 解析后为 null/{}，
+          // 这里统一归一化为数组，避免 .filter 崩溃导致整个仓库分析丢失
+          const repoContributors = Array.isArray(repoContributorsRaw)
+            ? repoContributorsRaw
+            : [];
           contributors.set(
             repo.full_name,
             // 机器人提交（dependabot / github-actions 等）不计入社交关系，
@@ -135,7 +140,7 @@ export class SocialGraphAnalyzer {
             if (stargazerErr instanceof Error) {
               core.warning(
                 `⚠️ Failed to fetch stargazers for ${repo.full_name}: ${stargazerErr.message}. ` +
-                  `Stargazers require authentication. Verify the github-token is valid and has sufficient scope.`
+                `Stargazers require authentication. Verify the github-token is valid and has sufficient scope.`
               );
             } else {
               core.warning(

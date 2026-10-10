@@ -61,6 +61,41 @@ describe('GitHubAPIService', () => {
     expect(stars[0].starred_at).toBe('2026-01-01T00:00:00Z');
   });
 
+  it('star 媒体类型被 403 拒绝时回退默认 Accept，返回纯用户数组映射', async () => {
+    // 第 1 次：star+json 被集成令牌拒绝（Actions 默认 GITHUB_TOKEN 的真实行为）
+    // 第 2 次：默认媒体类型返回纯用户数组
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), {
+          status: 403,
+          headers: RATE_LIMIT_HEADERS,
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ login: 'bob' }, { login: 'carol' }]), {
+          status: 200,
+          headers: RATE_LIMIT_HEADERS,
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const api = new GitHubAPIService('test-token');
+
+    const stars = await api.getStargazers('alice', 'repo-a');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, init1] = fetchMock.mock.calls[0];
+    expect((init1.headers as Record<string, string>).Accept).toBe(
+      'application/vnd.github.v3.star+json'
+    );
+    const [, init2] = fetchMock.mock.calls[1];
+    expect((init2.headers as Record<string, string>).Accept).toBe(
+      'application/vnd.github.v3+json'
+    );
+    expect(stars.map((s) => s.user.login)).toEqual(['bob', 'carol']);
+    expect(stars[0].starred_at).toBe(''); // 回退路径无标星时间
+  });
+
   it('无 token 时不发送 Authorization 头', async () => {
     const fetchMock = stubFetchJson([]);
     const api = new GitHubAPIService();
