@@ -30093,6 +30093,14 @@ const NODE_COLORS = {
 /** 并发池大小限制 */
 const CONCURRENCY_LIMIT = 5;
 /**
+ * 推荐打分中"为仓库点 star"信号的单仓库权重。
+ *
+ * 贡献信号直接使用贡献次数（通常 2~20），star 是弱得多的单向信号，
+ * 因此每个被 star 仓库只计 2 分：点一个仓库（2 分）不会盖过真正的协作者，
+ * 连续为多个仓库点 star（兴趣重合强）才会显著上浮。
+ */
+const STAR_SIGNAL_WEIGHT = 2;
+/**
  * 判断是否为机器人账号（github-actions[bot]、dependabot[bot]、renovate[bot] 等）。
  *
  * GitHub contributors 接口会返回 ``type: 'Bot'``；部分历史/边缘响应缺该字段，
@@ -30162,7 +30170,7 @@ class SocialGraphAnalyzer {
                     })));
                     try {
                         const stargazerList = await this.api.getStargazers(repo.owner.login, repo.name, 1, 50);
-                        stargazers.set(repo.full_name, stargazerList.map((s) => s.user.login));
+                        stargazers.set(repo.full_name, stargazerList.map((s) => ({ login: s.user.login, type: s.user.type })));
                     }
                     catch (stargazerErr) {
                         // stargazers 需要认证，若失败输出告警而非静默忽略
@@ -30299,6 +30307,7 @@ class SocialGraphAnalyzer {
     generateRecommendations(mainUser, following, repoData) {
         const followingSet = new Set(following.map((f) => f.login));
         const scoreMap = new Map();
+        // 信号 1：跨仓库协作者（强信号，按贡献次数计分）
         for (const [repo, contributors] of repoData.contributors) {
             for (const contributor of contributors) {
                 if (contributor.login === mainUser.login || followingSet.has(contributor.login))
@@ -30308,6 +30317,29 @@ class SocialGraphAnalyzer {
                 entry.reasons.push(`在 ${repo} 中有 ${contributor.contributions} 次贡献`);
                 scoreMap.set(contributor.login, entry);
             }
+        }
+        // 信号 2：为多个仓库点 star 的用户（弱信号，跨仓库兴趣重合才显著）。
+        // 先聚合每个人点过哪些仓库，再一次性计分，避免 reason 被单仓库刷屏。
+        const starredRepoMap = new Map();
+        for (const [repo, stars] of repoData.stargazers) {
+            for (const star of stars) {
+                if (isBotAccount(star) || star.login === mainUser.login || followingSet.has(star.login)) {
+                    continue;
+                }
+                const list = starredRepoMap.get(star.login) ?? [];
+                list.push(repo);
+                starredRepoMap.set(star.login, list);
+            }
+        }
+        for (const [login, starredRepos] of starredRepoMap) {
+            const entry = scoreMap.get(login) ?? { score: 0, reasons: [] };
+            entry.score += starredRepos.length * STAR_SIGNAL_WEIGHT;
+            const names = starredRepos
+                .slice(0, 3)
+                .map((r) => r.split('/')[1])
+                .join('、');
+            entry.reasons.push(`为你的 ${starredRepos.length} 个仓库点过 star（${names}）`);
+            scoreMap.set(login, entry);
         }
         return Array.from(scoreMap.entries())
             .sort((a, b) => b[1].score - a[1].score)

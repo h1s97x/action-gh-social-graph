@@ -17,6 +17,8 @@ export interface GitHubUser {
   following: number;
   created_at: string;
   updated_at: string;
+  // GitHub API 在用户对象上返回账号类型：User | Bot | Organization 等（可选字段）
+  type?: string;
 }
 
 export interface GitHubRepository {
